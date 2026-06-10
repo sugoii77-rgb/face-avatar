@@ -258,6 +258,36 @@
     let audioData = null;
     let audioCtx = null;
 
+    // ---- visemes ---------------------------------------------------------
+    // pre-rendered mouth shapes (rest / a / i / u / e / o) live in
+    // assets/visemes/. They were generated from the base photo, so they
+    // align pixel-perfect with the texture. Weights crossfade smoothly.
+    // Debug: ?viseme=a holds a single shape.
+    const VISEME = {
+      rect: { x: 340 / 1024, y: 609 / 1024, w: 410 / 1024, h: 287 / 1024 },
+      names: ['rest', 'a', 'i', 'u', 'e', 'o'],
+      images: null,
+      weights: { rest: 1, a: 0, i: 0, u: 0, e: 0, o: 0 },
+      target: 'rest',
+      openGoal: 0,
+      hold: new URLSearchParams(location.search).get('viseme')
+    };
+    const lastVis = { rest: 1, a: 0, i: 0, u: 0, e: 0, o: 0 };
+
+    function loadVisemes() {
+      Promise.all(VISEME.names.map(name =>
+        new Promise(resolve => {
+          const im = new Image();
+          im.onload = () => resolve([name, im]);
+          im.onerror = () => resolve(null);
+          im.src = './assets/visemes/viseme-' + name + '.png';
+        })
+      )).then(entries => {
+        if (entries.every(Boolean)) VISEME.images = Object.fromEntries(entries);
+      });
+    }
+    loadVisemes();
+
     function buildPhotoTexture(img, cfg) {
       const size = 1024;
       const cropSide = Math.min(img.width, img.height) / cfg.zoom;
@@ -362,7 +392,21 @@
       ctx.clearRect(0, 0, size, size);
       ctx.drawImage(base, 0, 0);
       if (blink > 0) BLINK.eyes.forEach(eye => drawLid(eye, blink));
-      if (mouth > 0.02) drawMouth(Math.min(mouth, 1));
+      if (VISEME.images) {
+        const r = VISEME.rect;
+        const dx = r.x * size, dy = r.y * size, dw = r.w * size, dh = r.h * size;
+        ctx.drawImage(VISEME.images.rest, dx, dy, dw, dh);
+        for (const name of ['a', 'i', 'u', 'e', 'o']) {
+          const wgt = VISEME.weights[name];
+          if (wgt > 0.01) {
+            ctx.globalAlpha = Math.min(1, wgt);
+            ctx.drawImage(VISEME.images[name], dx, dy, dw, dh);
+          }
+        }
+        ctx.globalAlpha = 1;
+      } else if (mouth > 0.02) {
+        drawMouth(Math.min(mouth, 1));   // fallback when viseme assets missing
+      }
       ctx.globalCompositeOperation = 'destination-in';
       ctx.drawImage(mask, 0, 0);
       ctx.globalCompositeOperation = 'source-over';
@@ -599,21 +643,44 @@
         const phase = (now % BLINK.period) / BLINK.duration;
         const b = BLINK.hold ? 1 : (phase < 1 ? Math.sin(Math.PI * phase) : 0);
         if (analyser) {
-          // speech-band energy -> mouth openness envelope
+          // speech-band energy + spectral centroid -> viseme choice
           analyser.getByteFrequencyData(audioData);
-          let sum = 0;
-          for (let i = 2; i < 40; i++) sum += audioData[i];
-          const level = sum / 38 / 255;
-          const targetMouth = Math.min(1, Math.max(0, (level - 0.05) * 3.4));
-          mouthLevel += (targetMouth - mouthLevel) * 0.5;
+          let sum = 0, wsum = 0;
+          for (let i = 2; i < 60; i++) { const v = audioData[i]; sum += v; wsum += v * i; }
+          const level = sum / 58 / 255;
+          const centroid = sum > 0 ? (wsum / sum) / 60 : 0;
+          const open = Math.min(1, Math.max(0, (level - 0.045) * 3.6));
+          let target = 'rest';
+          if (open > 0.07) {
+            if (centroid > 0.46) target = open > 0.55 ? 'e' : 'i';
+            else if (centroid < 0.30) target = open > 0.6 ? 'o' : 'u';
+            else target = open > 0.45 ? 'a' : 'e';
+          }
+          VISEME.target = target;
+          VISEME.openGoal = open;
+          mouthLevel += (open - mouthLevel) * 0.5;   // fallback blob driver
           if (mouthLevel < 0.015) mouthLevel = 0;
         }
+        // crossfade viseme weights (fast attack, softer release)
+        let visChanged = false;
+        for (const name of VISEME.names) {
+          let goal = 0;
+          if (VISEME.hold) goal = VISEME.hold === name ? 1 : 0;
+          else if (VISEME.target === name && name !== 'rest')
+            goal = Math.min(1, VISEME.openGoal * 1.5);
+          const w0 = VISEME.weights[name];
+          const w1 = w0 + (goal - w0) * (goal > w0 ? 0.42 : 0.26);
+          VISEME.weights[name] = w1;
+          if (Math.abs(w1 - lastVis[name]) > 0.015) visChanged = true;
+        }
         const m = MOUTH.hold ? 1 : mouthLevel;
-        if (Math.abs(b - lastBlink) > 0.01 || Math.abs(m - lastMouth) > 0.02 ||
-            (b === 0 && lastBlink !== 0) || (m === 0 && lastMouth !== 0)) {
+        if (Math.abs(b - lastBlink) > 0.01 || (b === 0 && lastBlink !== 0) ||
+            (VISEME.images && visChanged) ||
+            (!VISEME.images && (Math.abs(m - lastMouth) > 0.02 || (m === 0 && lastMouth !== 0)))) {
           composeTexture(b, m);
           lastBlink = b;
           lastMouth = m;
+          Object.assign(lastVis, VISEME.weights);
         }
       }
       renderer.render(scene, camera);
