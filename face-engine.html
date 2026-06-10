@@ -1,0 +1,541 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>Face Membrane Engine</title>
+  <style>
+    html, body {
+      margin: 0;
+      width: 100%;
+      height: 100%;
+      overflow: hidden;
+      background: #b9a8a6;
+    }
+
+    canvas {
+      display: block;
+      width: 100vw;
+      height: 100vh;
+    }
+
+    video {
+      display: none;
+    }
+  </style>
+</head>
+<body>
+  <canvas id="scene"></canvas>
+  <video id="cam" playsinline muted></video>
+
+  <script type="module">
+    import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+
+    const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
+    const sceneCanvas = document.getElementById('scene');
+    const video = document.getElementById('cam');
+
+    const renderer = new THREE.WebGLRenderer({
+      canvas: sceneCanvas,
+      antialias: true,
+      alpha: false,
+      powerPreference: 'high-performance'
+    });
+    renderer.setPixelRatio(Math.min(window.devicePixelRatio || 1, 1.6));
+    renderer.setClearColor(0xb9a8a6, 1);
+
+    const scene = new THREE.Scene();
+    scene.background = new THREE.Color(0xb9a8a6);
+    scene.fog = new THREE.Fog(0xb9a8a6, 7.5, 17);
+
+    const camera = new THREE.PerspectiveCamera(43, 1, 0.1, 60);
+    camera.position.set(0, 0, 10);
+
+    const N = 164;
+    const side = 12;
+    const geometry = new THREE.PlaneGeometry(side, side, N - 1, N - 1);
+    const height = new Float32Array(N * N);
+    const squeeze = 0.82;
+    const fx = value => 0.5 + (value - 0.5) * squeeze;
+
+    function addBlob(amp, cx, cy, sx, sy, rotation = 0) {
+      cx = fx(cx);
+      cy = fx(cy);
+      sx *= squeeze;
+      sy *= squeeze;
+      const cos = Math.cos(rotation);
+      const sin = Math.sin(rotation);
+      for (let y = 0; y < N; y++) {
+        const v = y / (N - 1);
+        for (let x = 0; x < N; x++) {
+          const u = x / (N - 1);
+          const dx = u - cx;
+          const dy = v - cy;
+          const rx = dx * cos + dy * sin;
+          const ry = -dx * sin + dy * cos;
+          height[y * N + x] += amp * Math.exp(-(rx * rx / (2 * sx * sx) + ry * ry / (2 * sy * sy)));
+        }
+      }
+    }
+
+    function addRidge(amp, x1, y1, x2, y2, radius) {
+      x1 = fx(x1);
+      x2 = fx(x2);
+      y1 = fx(y1);
+      y2 = fx(y2);
+      radius *= squeeze;
+      const bx = x2 - x1;
+      const by = y2 - y1;
+      const len = bx * bx + by * by;
+      for (let y = 0; y < N; y++) {
+        const v = y / (N - 1);
+        for (let x = 0; x < N; x++) {
+          const u = x / (N - 1);
+          const px = u - x1;
+          const py = v - y1;
+          const t = clamp((px * bx + py * by) / len, 0, 1);
+          const dx = px - t * bx;
+          const dy = py - t * by;
+          height[y * N + x] += amp * Math.exp(-(dx * dx + dy * dy) / (2 * radius * radius));
+        }
+      }
+    }
+
+    addBlob(0.52, 0.50, 0.51, 0.19, 0.265);
+    addBlob(0.24, 0.50, 0.31, 0.15, 0.105);
+    addBlob(0.17, 0.42, 0.425, 0.06, 0.025, -0.12);
+    addBlob(0.17, 0.58, 0.425, 0.06, 0.025, 0.12);
+    addBlob(-0.12, 0.42, 0.47, 0.05, 0.03);
+    addBlob(-0.12, 0.58, 0.47, 0.05, 0.03);
+    addBlob(0.055, 0.42, 0.47, 0.03, 0.016);
+    addBlob(0.055, 0.58, 0.47, 0.03, 0.016);
+    addRidge(0.28, 0.50, 0.445, 0.50, 0.565, 0.026);
+    addBlob(0.31, 0.50, 0.58, 0.037, 0.029);
+    addBlob(0.11, 0.462, 0.592, 0.021, 0.016);
+    addBlob(0.11, 0.538, 0.592, 0.021, 0.016);
+    addBlob(-0.06, 0.50, 0.623, 0.012, 0.02);
+    addBlob(0.155, 0.50, 0.652, 0.053, 0.015);
+    addBlob(-0.11, 0.50, 0.67, 0.052, 0.008);
+    addBlob(0.18, 0.50, 0.692, 0.046, 0.018);
+    addBlob(0.21, 0.50, 0.775, 0.067, 0.047);
+    addBlob(0.14, 0.355, 0.54, 0.064, 0.056);
+    addBlob(0.14, 0.645, 0.54, 0.064, 0.056);
+    addBlob(0.065, 0.50, 0.86, 0.11, 0.05);
+
+    const positions = geometry.attributes.position;
+    function applyHeight(field, amp) {
+      for (let y = 0; y < N; y++) {
+        for (let x = 0; x < N; x++) {
+          positions.setZ(y * N + x, field[y * N + x] * amp);
+        }
+      }
+      positions.needsUpdate = true;
+      geometry.computeVertexNormals();
+    }
+    applyHeight(height, 1.25);
+
+    // ---- photo relief --------------------------------------------------
+    // Drop a portrait at ./assets/face-photo.jpg and the membrane takes on
+    // that face's features (luminance -> emboss). Falls back to the
+    // procedural face above when the file is missing.
+    const PHOTO = {
+      src: './assets/face-photo.jpg',
+      centerU: 0.554,  // face center in the source image (0..1)
+      centerV: 0.531,
+      zoom: 1.36,      // bigger = tighter crop on the face
+      amp: 0.85,       // relief depth (parallax only - photo stays readable)
+      base: 0.45,      // head-mass weight (big soft volume)
+      detail: 1.7,     // feature emboss weight (brows, nose, lips)
+      fit: 1.16        // photo plane height relative to viewport height
+    };
+    let photoMode = false;
+
+    function boxBlurPass(src, w, h, radius, horizontal) {
+      const out = new Float32Array(w * h);
+      const span = radius * 2 + 1;
+      const lineCount = horizontal ? h : w;
+      const lineLen = horizontal ? w : h;
+      for (let line = 0; line < lineCount; line++) {
+        const idx = i => horizontal ? line * w + i : i * w + line;
+        let sum = 0;
+        for (let i = -radius; i <= radius; i++) {
+          sum += src[idx(clamp(i, 0, lineLen - 1))];
+        }
+        for (let i = 0; i < lineLen; i++) {
+          out[idx(i)] = sum / span;
+          const add = idx(clamp(i + radius + 1, 0, lineLen - 1));
+          const sub = idx(clamp(i - radius, 0, lineLen - 1));
+          sum += src[add] - src[sub];
+        }
+      }
+      return out;
+    }
+
+    function gaussBlur(src, w, h, sigma) {
+      const radius = Math.max(1, Math.round(sigma * 0.58));
+      let field = src;
+      for (let pass = 0; pass < 3; pass++) {
+        field = boxBlurPass(field, w, h, radius, true);
+        field = boxBlurPass(field, w, h, radius, false);
+      }
+      return field;
+    }
+
+    async function photoHeightField(cfg) {
+      const img = cfg.img;
+      const canvas = document.createElement('canvas');
+      canvas.width = N;
+      canvas.height = N;
+      const ctx = canvas.getContext('2d', { willReadFrequently: true });
+      const cropSide = Math.min(img.width, img.height) / cfg.zoom;
+      const sx = img.width * cfg.centerU - cropSide / 2;
+      const sy = img.height * cfg.centerV - cropSide / 2;
+      ctx.drawImage(img, sx, sy, cropSide, cropSide, 0, 0, N, N);
+      const data = ctx.getImageData(0, 0, N, N).data;
+      const gray = new Float32Array(N * N);
+      for (let i = 0; i < N * N; i++) {
+        gray[i] = (data[i * 4] * 0.299 + data[i * 4 + 1] * 0.587 + data[i * 4 + 2] * 0.114) / 255;
+      }
+      const baseField = gaussBlur(gray, N, N, N * 0.085);  // head volume
+      const fineField = gaussBlur(gray, N, N, N * 0.016);  // features
+      const midField = gaussBlur(gray, N, N, N * 0.05);    // lighting to remove
+      const out = new Float32Array(N * N);
+      let peak = 0;
+      for (let y = 0; y < N; y++) {
+        const v = y / (N - 1);
+        for (let x = 0; x < N; x++) {
+          const u = x / (N - 1);
+          const dx = (u - 0.5) / 0.295;
+          const dy = (v - 0.5) / 0.385;
+          const r = Math.hypot(dx, dy);
+          // smooth elliptical falloff so the emboss melts into the membrane
+          let mask = 0;
+          if (r < 0.6) mask = 1;
+          else if (r < 1) {
+            const t = (1 - r) / 0.4;
+            mask = t * t * (3 - 2 * t);
+          }
+          const i = y * N + x;
+          const value = (baseField[i] * cfg.base + (fineField[i] - midField[i]) * cfg.detail) * mask;
+          out[i] = value;
+          if (value > peak) peak = value;
+        }
+      }
+      if (peak > 0) {
+        for (let i = 0; i < N * N; i++) {
+          out[i] = clamp(out[i] / peak, -0.35, 1);
+        }
+      }
+      return out;
+    }
+
+    // ---- blink ---------------------------------------------------------
+    // every `period` ms the upper-lid skin sweeps down over each eye
+    const BLINK = {
+      eyes: [{ x: 0.367, y: 0.428 }, { x: 0.668, y: 0.442 }],  // eye centers in texture uv
+      rx: 0.080,        // eye half-width  (texture uv)
+      ry: 0.043,        // eye half-height (texture uv)
+      period: 3000,
+      duration: 280,
+      hold: new URLSearchParams(location.search).get('blink') === 'hold'
+    };
+    let photoTex = null;
+    let lastBlink = -1;
+
+    function buildPhotoTexture(img, cfg) {
+      const size = 1024;
+      const cropSide = Math.min(img.width, img.height) / cfg.zoom;
+      const sx = img.width * cfg.centerU - cropSide / 2;
+      const sy = img.height * cfg.centerV - cropSide / 2;
+
+      const base = document.createElement('canvas');
+      base.width = base.height = size;
+      base.getContext('2d').drawImage(img, sx, sy, cropSide, cropSide, 0, 0, size, size);
+
+      // elliptical feather mask (slightly taller than wide)
+      const mask = document.createElement('canvas');
+      mask.width = mask.height = size;
+      const mctx = mask.getContext('2d');
+      mctx.translate(size / 2, size / 2);
+      mctx.scale(1, 1.18);
+      const fade = mctx.createRadialGradient(0, 0, size * 0.33, 0, 0, size * 0.50);
+      fade.addColorStop(0, 'rgba(0,0,0,1)');
+      fade.addColorStop(1, 'rgba(0,0,0,0)');
+      mctx.fillStyle = fade;
+      mctx.fillRect(-size / 2, -size / 2 / 1.18, size, size / 1.18);
+
+      const canvas = document.createElement('canvas');
+      canvas.width = canvas.height = size;
+      const texture = new THREE.CanvasTexture(canvas);
+      texture.colorSpace = THREE.SRGBColorSpace;  // r152+: avoid washed-out double encode
+      photoTex = { texture, ctx: canvas.getContext('2d'), base, mask, size };
+      composeTexture(0);
+      return texture;
+    }
+
+    function drawLid(eye, b) {
+      const { ctx, base, size } = photoTex;
+      const px = eye.x * size;
+      const py = eye.y * size;
+      const rx = BLINK.rx * size;
+      const ry = BLINK.ry * size;
+      ctx.save();
+      ctx.beginPath();
+      ctx.ellipse(px, py, rx * 1.22, ry * 1.9, 0, 0, Math.PI * 2);
+      ctx.clip();
+      ctx.filter = 'blur(4px)';
+      // lid color = clean cheek skin sampled just below the eye,
+      // swept down from the top of the eye as the blink progresses
+      const coverTop = py - ry * 1.35;
+      const coverH = Math.max(ry * 2.7 * b, 1);
+      ctx.drawImage(
+        base,
+        px - rx * 1.4, py + ry * 1.6, rx * 2.8, ry * 1.6,
+        px - rx * 1.4, coverTop, rx * 2.8, coverH
+      );
+      ctx.filter = 'none';
+      if (b > 0.55) {
+        // lash line so the closed eye doesn't look blank
+        ctx.strokeStyle = 'rgba(70,45,40,' + (0.4 * (b - 0.55) / 0.45).toFixed(3) + ')';
+        ctx.lineWidth = size * 0.0022;
+        ctx.beginPath();
+        ctx.moveTo(px - rx * 0.85, py + ry * 0.15);
+        ctx.quadraticCurveTo(px, py + ry * 0.7, px + rx * 0.85, py + ry * 0.1);
+        ctx.stroke();
+      }
+      ctx.restore();
+    }
+
+    function composeTexture(blink) {
+      const { ctx, base, mask, size, texture } = photoTex;
+      ctx.globalCompositeOperation = 'source-over';
+      ctx.clearRect(0, 0, size, size);
+      ctx.drawImage(base, 0, 0);
+      if (blink > 0) BLINK.eyes.forEach(eye => drawLid(eye, blink));
+      ctx.globalCompositeOperation = 'destination-in';
+      ctx.drawImage(mask, 0, 0);
+      ctx.globalCompositeOperation = 'source-over';
+      texture.needsUpdate = true;
+    }
+
+    function loadPhoto(src) {
+      return new Promise((resolve, reject) => {
+        const image = new Image();
+        image.onload = () => resolve(image);
+        image.onerror = () => reject(new Error('photo missing'));
+        image.src = src;
+      });
+    }
+
+    loadPhoto(PHOTO.src)
+      .then(async img => {
+        PHOTO.img = img;
+        const field = await photoHeightField(PHOTO);
+        applyHeight(field, PHOTO.amp);
+        // photo mode: show the actual portrait, let its own lighting carry
+        material.map = buildPhotoTexture(img, PHOTO);
+        material.transparent = true;
+        material.color.set(0xffffff);
+        material.roughness = 0.9;
+        material.clearcoat = 0.1;
+        material.clearcoatRoughness = 0.6;
+        material.needsUpdate = true;
+        ambient.color.set(0xffffff);
+        ambient.intensity = 1.0;
+        key.intensity = 0.15;
+        cyan.intensity = 0.06;
+        magenta.intensity = 0.05;
+        gloss.intensity = 0.04;
+        scene.fog = null;
+        photoMode = true;
+        resize();
+      })
+      .catch(() => { /* no photo: keep procedural face */ });
+
+    const material = new THREE.MeshPhysicalMaterial({
+      color: 0xd9c9c5,
+      roughness: 0.48,
+      metalness: 0,
+      clearcoat: 0.62,
+      clearcoatRoughness: 0.44,
+      reflectivity: 0.72,
+      transparent: false
+    });
+    const face = new THREE.Mesh(geometry, material);
+    scene.add(face);
+
+    const ambient = new THREE.AmbientLight(0xd3c4c0, 0.66);
+    scene.add(ambient);
+    const key = new THREE.DirectionalLight(0xfff7ef, 0.32);
+    key.position.set(2.5, 4, 6);
+    scene.add(key);
+    const cyan = new THREE.DirectionalLight(0x72dfd0, 0.33);
+    cyan.position.set(-7, 0.5, 2.7);
+    scene.add(cyan);
+    const magenta = new THREE.DirectionalLight(0xff89bf, 0.28);
+    magenta.position.set(7, -1.1, 2.6);
+    scene.add(magenta);
+    const gloss = new THREE.PointLight(0xffffff, 0.15, 30);
+    gloss.position.set(-1, 2, 5);
+    scene.add(gloss);
+
+    const target = { x: 0, y: 0 };
+    const mouse = { x: 0, y: 0 };
+    const camLook = { x: 0, y: 0 };
+    let lastMouseAt = performance.now();
+    let cameraRequested = false;
+    let camOn = false;
+    let detector = null;
+    let stream = null;
+    let camTimer = null;
+
+    function resize() {
+      const width = window.innerWidth;
+      const height = window.innerHeight;
+      renderer.setSize(width, height, false);
+      camera.aspect = width / height;
+      camera.updateProjectionMatrix();
+      const viewH = 2 * camera.position.z * Math.tan(THREE.MathUtils.degToRad(camera.fov / 2));
+      const viewW = viewH * camera.aspect;
+      // membrane mode: oversize to keep the plane border off-screen.
+      // photo mode: fit by height so the portrait reads like a person.
+      const span = photoMode ? viewH * PHOTO.fit : Math.max(viewW, viewH) * 1.5;
+      face.scale.setScalar(span / side);
+    }
+    window.addEventListener('resize', resize);
+    resize();
+
+    function setMouse(clientX, clientY) {
+      mouse.x = (clientX / window.innerWidth) * 2 - 1;
+      mouse.y = (clientY / window.innerHeight) * 2 - 1;
+      lastMouseAt = performance.now();
+    }
+    window.addEventListener('mousemove', event => setMouse(event.clientX, event.clientY));
+    window.addEventListener('touchmove', event => {
+      const touch = event.touches[0];
+      if (touch) setMouse(touch.clientX, touch.clientY);
+    }, { passive: true });
+
+    function loadScript(src) {
+      return new Promise((resolve, reject) => {
+        const script = document.createElement('script');
+        script.src = src;
+        script.onload = resolve;
+        script.onerror = () => reject(new Error(src));
+        document.head.appendChild(script);
+      });
+    }
+
+    async function prepareDetector() {
+      if (!window.FaceDetection) {
+        await loadScript('https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/face_detection.js');
+      }
+      if (!detector) {
+        detector = new FaceDetection({
+          locateFile: file => `https://cdn.jsdelivr.net/npm/@mediapipe/face_detection/${file}`
+        });
+        detector.setOptions({ model: 'short', minDetectionConfidence: 0.52 });
+        detector.onResults(results => {
+          const detection = results.detections?.[0];
+          if (!detection) return;
+          const box = detection.boundingBox;
+          camLook.x = clamp(((1 - box.xCenter) * 2 - 1) * 1.85, -1, 1);
+          camLook.y = clamp((box.yCenter * 2 - 1) * 1.75, -1, 1);
+        });
+      }
+      clearInterval(camTimer);
+      let busy = false;
+      camTimer = setInterval(async () => {
+        if (busy || video.readyState < 2) return;
+        busy = true;
+        try { await detector.send({ image: video }); } catch (_) {}
+        busy = false;
+      }, 95);
+    }
+
+    async function useCameraStream(nextStream) {
+      stream = nextStream;
+      video.srcObject = stream;
+      await video.play();
+      camOn = true;
+      await prepareDetector();
+    }
+
+    async function startCamera() {
+      if (camOn || cameraRequested) return;
+      cameraRequested = true;
+      if (!navigator.mediaDevices?.getUserMedia) {
+        cameraRequested = false;
+        return;
+      }
+      const nextStream = await navigator.mediaDevices.getUserMedia({
+        video: { width: 320, height: 240, facingMode: 'user' },
+        audio: false
+      });
+      await useCameraStream(nextStream);
+    }
+
+    window.__attachCameraStream = async nextStream => {
+      if (camOn) return;
+      cameraRequested = true;
+      await useCameraStream(nextStream);
+    };
+
+    function stopCamera() {
+      clearInterval(camTimer);
+      if (stream) stream.getTracks().forEach(track => track.stop());
+      stream = null;
+      camOn = false;
+      cameraRequested = false;
+    }
+
+    window.addEventListener('message', event => {
+      const data = event.data || {};
+      if (data.type === 'camera:start') startCamera().catch(() => stopCamera());
+      if (data.type === 'camera:stop') stopCamera();
+      if (data.type === 'pointer') setMouse(data.x, data.y);
+    });
+
+    window.__membraneState = () => ({
+      camOn,
+      cameraRequested,
+      idleFor: performance.now() - lastMouseAt,
+      target,
+      mouse,
+      camLook,
+      rotation: { x: face.rotation.x, y: face.rotation.y }
+    });
+
+    const maxY = 0.46;
+    const maxX = 0.34;
+    const ease = 0.038;
+    const started = performance.now();
+
+    function animate(now) {
+      requestAnimationFrame(animate);
+      const t = (now - started) / 1000;
+      const idle = now - lastMouseAt > 1800;
+      const sourceX = idle && camOn ? camLook.x : mouse.x;
+      const sourceY = idle && camOn ? camLook.y : mouse.y;
+      target.x += (sourceX - target.x) * ease;
+      target.y += (sourceY - target.y) * ease;
+      face.rotation.y += (target.x * maxY + Math.sin(t * 0.33) * 0.012 - face.rotation.y) * ease;
+      face.rotation.x += (target.y * maxX + Math.cos(t * 0.27) * 0.01 - face.rotation.x) * ease;
+      face.position.x += (target.x * -0.34 - face.position.x) * 0.025;
+      face.position.y += (target.y * 0.22 - face.position.y) * 0.025;
+      gloss.position.x = -1 + target.x * 2.55;
+      gloss.position.y = 2 - target.y * 2.1;
+      if (photoMode && photoTex) {
+        const phase = (now % BLINK.period) / BLINK.duration;
+        const b = BLINK.hold ? 1 : (phase < 1 ? Math.sin(Math.PI * phase) : 0);
+        if (Math.abs(b - lastBlink) > 0.01 || (b === 0 && lastBlink !== 0)) {
+          composeTexture(b);
+          lastBlink = b;
+        }
+      }
+      renderer.render(scene, camera);
+    }
+    requestAnimationFrame(animate);
+  </script>
+</body>
+</html>
