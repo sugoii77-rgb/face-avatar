@@ -242,6 +242,22 @@
     let photoTex = null;
     let lastBlink = -1;
 
+    // ---- mouth / lip-sync ----------------------------------------------
+    // driven by any audio stream handed in via __attachAudioStream
+    // (system audio through getDisplayMedia, TTS, etc.)
+    const MOUTH = {
+      x: 0.532,         // mouth center (lip line) in texture uv
+      y: 0.7155,
+      rx: 0.105,        // mouth half-width
+      ry: 0.050,        // lip half-height
+      hold: new URLSearchParams(location.search).get('mouth') === 'hold'
+    };
+    let mouthLevel = 0;
+    let lastMouth = -1;
+    let analyser = null;
+    let audioData = null;
+    let audioCtx = null;
+
     function buildPhotoTexture(img, cfg) {
       const size = 1024;
       const cropSide = Math.min(img.width, img.height) / cfg.zoom;
@@ -306,12 +322,47 @@
       ctx.restore();
     }
 
-    function composeTexture(blink) {
+    function drawMouth(open) {
+      const { ctx, base, size } = photoTex;
+      const px = MOUTH.x * size;
+      const py = MOUTH.y * size;
+      const rx = MOUTH.rx * size;
+      const ry = MOUTH.ry * size;
+      const drop = ry * 1.4 * open;          // jaw drop distance
+      ctx.save();
+      ctx.beginPath();
+      ctx.ellipse(px, py + ry + drop * 0.5, rx * 1.35, ry * 2.3 + drop * 0.5, 0, 0, Math.PI * 2);
+      ctx.clip();
+      ctx.filter = 'blur(3px)';
+      // push only the lower lip + chin down by `drop` (upper lip stays)
+      ctx.drawImage(
+        base,
+        px - rx * 1.5, py + ry * 0.15, rx * 3, ry * 3.2,
+        px - rx * 1.5, py + ry * 0.15 + drop, rx * 3, ry * 3.2
+      );
+      // inner mouth fills the gap between the lips
+      ctx.filter = 'blur(1px)';
+      const innerH = Math.max(drop * 0.5 + ry * 0.15, 1);
+      const cy = py + drop * 0.5 + ry * 0.1;
+      const grad = ctx.createRadialGradient(px, cy, innerH * 0.2, px, cy, rx * 0.66);
+      grad.addColorStop(0, 'rgba(46,18,20,0.9)');
+      grad.addColorStop(0.7, 'rgba(72,28,30,0.72)');
+      grad.addColorStop(1, 'rgba(96,42,44,0)');
+      ctx.fillStyle = grad;
+      ctx.beginPath();
+      ctx.ellipse(px, cy, rx * 0.62, innerH, 0, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.filter = 'none';
+      ctx.restore();
+    }
+
+    function composeTexture(blink, mouth = 0) {
       const { ctx, base, mask, size, texture } = photoTex;
       ctx.globalCompositeOperation = 'source-over';
       ctx.clearRect(0, 0, size, size);
       ctx.drawImage(base, 0, 0);
       if (blink > 0) BLINK.eyes.forEach(eye => drawLid(eye, blink));
+      if (mouth > 0.02) drawMouth(Math.min(mouth, 1));
       ctx.globalCompositeOperation = 'destination-in';
       ctx.drawImage(mask, 0, 0);
       ctx.globalCompositeOperation = 'source-over';
@@ -481,6 +532,25 @@
       await useCameraStream(nextStream);
     };
 
+    // lip-sync source: any MediaStream with an audio track
+    window.__attachAudioStream = stream => {
+      const track = stream.getAudioTracks()[0];
+      if (!track) return false;
+      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
+      const source = audioCtx.createMediaStreamSource(new MediaStream([track]));
+      analyser = audioCtx.createAnalyser();
+      analyser.fftSize = 512;
+      analyser.smoothingTimeConstant = 0.55;
+      source.connect(analyser);
+      audioData = new Uint8Array(analyser.frequencyBinCount);
+      track.addEventListener('ended', () => {
+        analyser = null;
+        mouthLevel = 0;
+      });
+      if (audioCtx.state === 'suspended') audioCtx.resume();
+      return true;
+    };
+
     function stopCamera() {
       clearInterval(camTimer);
       if (stream) stream.getTracks().forEach(track => track.stop());
@@ -528,9 +598,22 @@
       if (photoMode && photoTex) {
         const phase = (now % BLINK.period) / BLINK.duration;
         const b = BLINK.hold ? 1 : (phase < 1 ? Math.sin(Math.PI * phase) : 0);
-        if (Math.abs(b - lastBlink) > 0.01 || (b === 0 && lastBlink !== 0)) {
-          composeTexture(b);
+        if (analyser) {
+          // speech-band energy -> mouth openness envelope
+          analyser.getByteFrequencyData(audioData);
+          let sum = 0;
+          for (let i = 2; i < 40; i++) sum += audioData[i];
+          const level = sum / 38 / 255;
+          const targetMouth = Math.min(1, Math.max(0, (level - 0.05) * 3.4));
+          mouthLevel += (targetMouth - mouthLevel) * 0.5;
+          if (mouthLevel < 0.015) mouthLevel = 0;
+        }
+        const m = MOUTH.hold ? 1 : mouthLevel;
+        if (Math.abs(b - lastBlink) > 0.01 || Math.abs(m - lastMouth) > 0.02 ||
+            (b === 0 && lastBlink !== 0) || (m === 0 && lastMouth !== 0)) {
+          composeTexture(b, m);
           lastBlink = b;
+          lastMouth = m;
         }
       }
       renderer.render(scene, camera);
