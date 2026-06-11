@@ -30,6 +30,7 @@
 
   <script type="module">
     import * as THREE from 'https://cdn.jsdelivr.net/npm/three@0.160.0/build/three.module.js';
+    import { LIPSYNC, createAnalyzer, analyzeFrame, visemeTargets, smoothWeights } from './lipsync.js';
 
     const clamp = (value, min, max) => Math.max(min, Math.min(max, value));
     const sceneCanvas = document.getElementById('scene');
@@ -254,9 +255,10 @@
     };
     let mouthLevel = 0;
     let lastMouth = -1;
-    let analyser = null;
-    let audioData = null;
-    let audioCtx = null;
+    let lipAn = null;                 // analyzer from lipsync.js
+    const audioCtxRef = { ctx: null };
+    let silentSince = 0;
+    let jawSm = 0;                    // smoothed jaw-follow value
 
     // ---- visemes ---------------------------------------------------------
     // pre-rendered mouth shapes (rest / a / i / u / e / o) live in
@@ -578,20 +580,13 @@
 
     // lip-sync source: any MediaStream with an audio track
     window.__attachAudioStream = stream => {
-      const track = stream.getAudioTracks()[0];
-      if (!track) return false;
-      audioCtx = audioCtx || new (window.AudioContext || window.webkitAudioContext)();
-      const source = audioCtx.createMediaStreamSource(new MediaStream([track]));
-      analyser = audioCtx.createAnalyser();
-      analyser.fftSize = 512;
-      analyser.smoothingTimeConstant = 0.55;
-      source.connect(analyser);
-      audioData = new Uint8Array(analyser.frequencyBinCount);
-      track.addEventListener('ended', () => {
-        analyser = null;
+      const an = createAnalyzer(stream, audioCtxRef);
+      if (!an) return false;
+      lipAn = an;
+      an.track.addEventListener('ended', () => {
+        lipAn = null;
         mouthLevel = 0;
       });
-      if (audioCtx.state === 'suspended') audioCtx.resume();
       return true;
     };
 
@@ -634,45 +629,41 @@
       target.x += (sourceX - target.x) * ease;
       target.y += (sourceY - target.y) * ease;
       face.rotation.y += (target.x * maxY + Math.sin(t * 0.33) * 0.012 - face.rotation.y) * ease;
-      face.rotation.x += (target.y * maxX + Math.cos(t * 0.27) * 0.01 - face.rotation.x) * ease;
+      face.rotation.x += (target.y * maxX + Math.cos(t * 0.27) * 0.01 + jawSm * 0.035 - face.rotation.x) * ease;
       face.position.x += (target.x * -0.34 - face.position.x) * 0.025;
-      face.position.y += (target.y * 0.22 - face.position.y) * 0.025;
+      face.position.y += (target.y * 0.22 - jawSm * 0.05 - face.position.y) * 0.025;
       gloss.position.x = -1 + target.x * 2.55;
       gloss.position.y = 2 - target.y * 2.1;
       if (photoMode && photoTex) {
         const phase = (now % BLINK.period) / BLINK.duration;
         const b = BLINK.hold ? 1 : (phase < 1 ? Math.sin(Math.PI * phase) : 0);
-        if (analyser) {
-          // speech-band energy + spectral centroid -> viseme choice
-          analyser.getByteFrequencyData(audioData);
-          let sum = 0, wsum = 0;
-          for (let i = 2; i < 60; i++) { const v = audioData[i]; sum += v; wsum += v * i; }
-          const level = sum / 58 / 255;
-          const centroid = sum > 0 ? (wsum / sum) / 60 : 0;
-          const open = Math.min(1, Math.max(0, (level - 0.045) * 3.6));
-          let target = 'rest';
-          if (open > 0.07) {
-            if (centroid > 0.46) target = open > 0.55 ? 'e' : 'i';
-            else if (centroid < 0.30) target = open > 0.6 ? 'o' : 'u';
-            else target = open > 0.45 ? 'a' : 'e';
-          }
-          VISEME.target = target;
-          VISEME.openGoal = open;
-          mouthLevel += (open - mouthLevel) * 0.5;   // fallback blob driver
+        // articulation axes (openness / width / roundness) -> viseme targets
+        let targets;
+        if (lipAn) {
+          const f = analyzeFrame(lipAn);
+          if (f.openness > 0.02) silentSince = now;
+          targets = visemeTargets(f, now, silentSince);
+          mouthLevel += (f.openness - mouthLevel) * 0.5;   // fallback blob driver
           if (mouthLevel < 0.015) mouthLevel = 0;
+        } else {
+          targets = visemeTargets({ openness: 0, width: 0, roundness: 0 }, now, silentSince);
         }
-        // crossfade viseme weights (fast attack, softer release)
         let visChanged = false;
-        for (const name of VISEME.names) {
-          let goal = 0;
-          if (VISEME.hold) goal = VISEME.hold === name ? 1 : 0;
-          else if (VISEME.target === name && name !== 'rest')
-            goal = Math.min(1, VISEME.openGoal * 1.5);
-          const w0 = VISEME.weights[name];
-          const w1 = w0 + (goal - w0) * (goal > w0 ? 0.42 : 0.26);
-          VISEME.weights[name] = w1;
-          if (Math.abs(w1 - lastVis[name]) > 0.015) visChanged = true;
+        let openNow = 0;
+        if (VISEME.hold) {
+          for (const name of VISEME.names) {
+            const goal = VISEME.hold === name ? 1 : 0;
+            if (Math.abs(VISEME.weights[name] - goal) > 0.01) visChanged = true;
+            VISEME.weights[name] = goal;
+            if (name !== 'rest') openNow += goal;
+          }
+        } else {
+          const r = smoothWeights(VISEME.weights, targets, VISEME.names);
+          visChanged = r.changed;
+          openNow = r.open;
         }
+        // subtle jaw follow: tiny nod scaled by openness, face stays put
+        jawSm += (Math.min(openNow, 1) - jawSm) * 0.18;
         const m = MOUTH.hold ? 1 : mouthLevel;
         if (Math.abs(b - lastBlink) > 0.01 || (b === 0 && lastBlink !== 0) ||
             (VISEME.images && visChanged) ||
@@ -680,7 +671,6 @@
           composeTexture(b, m);
           lastBlink = b;
           lastMouth = m;
-          Object.assign(lastVis, VISEME.weights);
         }
       }
       renderer.render(scene, camera);
